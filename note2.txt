@@ -1,0 +1,136 @@
+import numpy as np
+import cv2 as cv
+import math
+# import PWMServo
+
+ori_width = int(4 * 160)  # 原始图像640x480
+ori_height = int(3 * 160)
+resize_width = int(80)  # 处理图像时缩小为80x60,加快处理速度，谨慎修改！
+resize_height = int(60)
+line_color = (255, 0, 0)  # 图像显示时，画出的线框颜色
+line_thickness = 2  # 图像显示时，画出的线框的粗细
+flag = 0
+# stream = "http://127.0.0.1:8080/?action=stream?dummy=param.mjpg"
+
+
+#获取面积最大的轮廓
+def getAreaMaxContour(contours):
+        contour_area_temp = 0
+        contour_area_max = 0
+        area_max_contour = None
+        for c in contours:
+            contour_area_temp = math.fabs(cv.contourArea(c))        #计算面积
+            if contour_area_temp > contour_area_max:                #新面积大于历史最大面积就将新面积设为历史最大面积
+                contour_area_max = contour_area_temp
+                if contour_area_temp > 100:                         #只有新的历史最大面积大于100,才是有效的最大面积
+                    area_max_contour = c
+        return area_max_contour                     #返回得到的最大面积，如果没有就是 None
+
+def getDisMax(contours, frame):                     # 获取
+    standard = 80
+    disTemp = None
+    disMax = 0
+    # disArry = []
+    for i in contours:
+        (centerX, centerY), radius = cv.minEnclosingCircle(i)
+        area = cv.contourArea(i)
+        if area > 100 and area <=1000:                                   # 限定圆的面积
+            print("area is: %s" % area)
+            # cv.circle(frame, (int(centerX), int(centerY)), int(radius), (0, 0, 255), 2)
+            # disArry.append(centerY)
+            if centerY > disMax:                        # 遍历找距离最近的轮廓
+                disMax = centerY
+                disTemp = i
+
+    return disTemp
+
+
+def Task(frame):
+    global flag
+    '''
+    flag
+    0: 表示没有黑线
+    1: 表示左边有黑线
+    2: 表示右边右黑线
+    '''
+
+    # flag = 3
+    location = 207
+    src1 = cv.cvtColor(frame, cv.COLOR_BGR2HSV)     # hsv色彩空间
+    h, s, v = cv.split(src1)                        # 分离出各个HSV通道
+    # v = cv.equalizeHist(v)                        # 直方图化
+    src1 = cv.merge((h, s, v))                      # 合并三个通道
+
+    src21 = cv.inRange(src1, (0, 0, 0), (180, 255, 102), ())                    # 对原图像和掩模进行位运算(陷阱)
+    src31 = cv.morphologyEx(src21, cv.MORPH_CLOSE, np.ones((3, 3), np.uint8))     # 闭操作
+    contours, hierarchy = cv.findContours(src31, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)      # 找出轮廓
+    #areaMaxContour = getAreaMaxContour(contours)    # 找出最大轮廓
+    dis = getDisMax(contours, frame)                # 距离最短
+
+    # ---------------------
+    for i, contour in enumerate(contours):  # 检测黑线
+        x, y, w, h = cv.boundingRect(contour)
+        if h >= 40 and (x == 0 or x+w == 360):
+            cv.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            if x > 180:
+                print("黑线在右边")
+                flag = 2
+            else:
+                print("黑线在左边")
+                flag = 1
+        else:
+            flag = 0
+        print("x: %s" % (x + w))
+
+
+    # ---------------------
+
+    if dis is not None:      # 距离最近的陷阱
+        # print("The area is: %s"%cv.contourArea(dis))
+        (centerX, centerY), radius = cv.minEnclosingCircle(dis)         # 获取最小外接圆
+        cv.circle(frame, (int(centerX), int(centerY)), int(radius), (0, 0, 255), 2)
+        # print("center of circle: (%s,%s)" % (centerX, centerY))
+        if centerY < location and flag == 0:
+            print("Go")
+        elif centerX > 180 and centerY >= location:     # 陷阱在机器人右边
+            if flag == 1:
+                print("balck: right shift")
+            else:
+                print("left shift")         # 左移右移需要看看黑线
+        elif centerX <= 180 and centerY >= location:    # 陷阱在机器人左边
+            if flag == 2:
+                print("black: left shift")
+            else:
+                print("right shift")
+
+    elif flag != 0 and dis is None:                 # 视野里没有陷阱 但有黑线
+        print("**Go 要左右移动一点点")
+    else:                                           # 视野里没有陷阱 且没有出现黑线
+        print("*Go")
+        # flag = 0
+
+
+
+    cv.imshow("Frame", frame)
+    cv.imshow("src31", src31)
+
+
+
+
+def video_demo():
+    # src = "C://Users//ASUS//Desktop//robot-running//Task//test1.avi"
+    capture = cv.VideoCapture(1)
+    while(True):
+        ret, frame = capture.read()
+        frame = cv.resize(frame, (360, 240), interpolation=cv.INTER_CUBIC)    # 将图片缩放
+        # frame = cv.flip(frame, 0)
+        Task(frame)
+        c = cv.waitKey(40)
+        if c == 27:
+            capture.release()
+            break
+
+
+video_demo()
+cv.waitKey(0)
+

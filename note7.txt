@@ -1,0 +1,206 @@
+import numpy as np
+import cv2 as cv
+import math
+# import PWMServo
+import threading
+import time
+
+ori_width = int(4 * 160)  # 原始图像640x480
+ori_height = int(3 * 160)
+resize_width = int(80)  # 处理图像时缩小为80x60,加快处理速度，谨慎修改！
+resize_height = int(60)
+line_color = (255, 0, 0)  # 图像显示时，画出的线框颜色
+line_thickness = 2  # 图像显示时，画出的线框的粗细
+flag = 0                # 标志黑线在左边或右边
+symbol = True           # 标志是否要一直平移
+signal = 0              # 用来记住flag，因为flag每次都会刷新
+blackLine = None
+circleMin = 20
+circleMax = 1100
+width = int(80)
+height = int(60)
+# stream = "http://127.0.0.1:8080/?action=stream?dummy=param.mjpg"
+go = False
+leftShift = False
+rightShift = False
+frame = None
+
+def actionGroup():
+    global frame
+    global go
+    global leftShift
+    global rightShift
+    while True:
+        if go:
+            # SSR.running_action_group('6_go_straight_step2', 1)
+            print("Go")
+            go = False
+        elif leftShift:
+            # SSR.running_action_group('one_step_left_small', 1)
+            print("left shift")
+            leftShift = False
+        elif rightShift:
+            # SSR.running_action_group('one_step_right_small', 1)
+            print("right shift")
+            rightShift = False
+        Task(frame)
+
+th1 = threading.Thread(target=actionGroup)  # 把 Move设置为子线程
+th1.setDaemon(True)  # 守护线程，主线程不等这个线程然后执行自己
+th1.start()
+
+def getDisMax(contours, frame):                     # 获取
+    global circleMax
+    global circleMin
+    disTemp = None                                  # 返回合适的结果
+    disMax = 0
+    for i in contours:
+        (centerX, centerY), radius = cv.minEnclosingCircle(i)
+        area = cv.contourArea(i)
+        if area > circleMin and area <= circleMax:                                   # 限定圆的面积
+            if centerY > disMax:                        # 遍历找距离最近的轮廓
+                disMax = centerY
+                disTemp = i
+    return disTemp
+
+
+def Task():
+
+    '''
+    flag
+    0: 表示没有黑线
+    1: 表示左边有黑线
+    2: 表示右边有黑线
+    '''
+
+    global flag
+    global blackLine
+    global symbol
+    global signal
+    global go
+    global leftShift
+    global rightShift
+    # ------------------
+
+    # 图像二值法
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    ret, binary = cv.threshold(gray, 120, 255, cv.THRESH_BINARY_INV)
+    cv.imshow("binary", binary)
+    contours, hierarchy = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)      # 找出轮廓
+    # ------------------
+
+
+    safeDis = 70.5                                    # 机器人停下来的安全距离
+    dis = getDisMax(contours, frame)                                            # 距离最短
+
+    # ---------------------
+    for i, contour in enumerate(contours):                  # 检测黑线
+        x, y, w, h = cv.boundingRect(contour)
+        if h >= 40 and (x == 0 or x+w == height):              # 区别黑线和陷阱的区别
+            blackLine = contour
+            cv.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            if x > height/2:
+                # print("黑线在右边")
+                flag = 2
+            else:
+                # print("黑线在左边")
+                flag = 1
+        else:
+            flag = 0                                    # 没有黑线
+    # ---------------------
+
+    if blackLine is dis:                                # 当将黑线误以为是陷阱时，把陷阱置为空
+        dis = None
+
+    # ---------------------                             # 处理结果
+    if dis is not None:
+        (centerX, centerY), radius = cv.minEnclosingCircle(dis)
+        # print("center of circle: (%s,%s)" % (centerX, centerY))
+        cv.circle(frame, (int(centerX), int(centerY)), int(radius), (0, 0, 255), 2)
+
+    if dis is not None and blackLine is None:                               # 有陷阱没黑线    第1种情况
+        if centerY < safeDis:
+            go = True
+            # print("centerY: %s" % centerY + "sateDis: %s" % safeDis)
+            print("*Go")
+        elif centerX > height/2 and centerY >= safeDis and symbol is True:      # 陷阱在机器人右边
+            print("*left shift")
+
+            leftShift = True
+        elif centerX <= height/2 and centerY >= safeDis and symbol is True:     # 陷阱在机器人左边
+            print("*right shift")
+            rightShift = True
+    elif dis is not None and blackLine is not None:                         # 有陷阱有黑线    第2种情况
+        if centerY < safeDis:       # 在安全距离之外
+            print("**Go  看到黑线，走进一点,左右平移一点")
+        elif centerY >= safeDis:    # 在安全距离之内
+            symbol = False                                                  # 标志位置为False
+            if flag == 1:               # 陷阱在左边
+                print("**right shift")
+                rightShift = True
+            elif flag == 2:
+                print("**left shift")   # 陷阱在右边
+                leftShift = True
+        '''
+        首先得判断陷阱是否在安全距离之内还是之外
+        如果是在之外，再走近一点，以免左右平移会踩到其它的点
+        如果是在之内，将要往相反的方向平移
+        每次平移前，要调整与黑线平行
+        '''
+
+    elif dis is None and blackLine is not None:                             # 第3种情况 没陷阱有黑线
+        if flag == 1:
+            print("***right shift")
+            rightShift = True
+        elif flag == 2:
+            print("***left shift")
+            leftShift = True
+    else:                                                                   # 第4种情况 没陷阱没黑线
+        print("****Go")
+        symbol = True
+
+    blackLine = None                                                         # 置为空
+    # print(symbol)
+    # print("signal is: %s" % signal)
+    # print("flag is: %s" % flag)
+
+    if not symbol:                  # 为解决第二种情况的方法
+        if flag == 1:               # 记录黑线的位置，因为flag 会因看不到黑线而改变值，需要signal去记录
+            signal = 1
+        elif flag == 2:
+            signal = 2
+
+        if signal == 1:
+            # print("## right shift")
+            rightShift = True
+        elif signal == 2:
+            # print("## left shift")
+            leftShift = True
+
+    # ---------------------
+
+    cv.imshow("Frame", frame)
+    # cv.imshow("src31", src31)
+
+
+
+
+def video_demo():
+    # src = "C://Users//ASUS//Desktop//robot-running//Task//test1.avi"
+    global frame
+    capture = cv.VideoCapture(1)
+    while(True):
+        # time.sleep(2)
+        ret, frame = capture.read()
+        frame = cv.resize(frame, (height, width), interpolation=cv.INTER_CUBIC)    # 将图片缩放
+        Task()
+        c = cv.waitKey(40)
+        if c == 27:
+            capture.release()
+            break
+
+
+
+video_demo()
+cv.waitKey(0)
+
