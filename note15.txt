@@ -1,0 +1,256 @@
+import cv2 as cv
+import threading
+import PWMServo
+import Serial_Servo_Running as SSR
+import time
+
+flag = 0  # 标志黑线在左边或右边
+symbol = True  # 标志是否要一直平移
+signal = 0  # 用来记住flag，因为flag每次都会刷新
+blackLine = None
+circleMin = 20
+circleMax = 1100
+width = int(80)
+height = int(60)
+stream = "http://127.0.0.1:8080/?action=stream?dummy=param.mjpg"
+go = False
+leftShift = False
+rightShift = False
+frame = None
+runAction = False
+servo_1 = 1
+servo_2 = 2
+camero_Y_Angle = 2100           # normal angle
+PWMServo.setServo(1, camero_Y_Angle, 500)
+PWMServo.setServo(2, 1460, 500)
+
+# safeDis = 60
+safeDis = 55            # 机器人停下来的安全距离
+safeDisMin = 45
+special = 0             # 安全范围内的信号
+count = 0
+time.sleep(1)
+
+
+def getDisMax(contours, frame):  # 获取
+    global circleMax
+    global circleMin
+    disTemp = None  # 返回合适的结果
+    disMax = 0
+    for i in contours:
+        (centerX, centerY), radius = cv.minEnclosingCircle(i)
+        area = cv.contourArea(i)
+        if area > circleMin and area <= circleMax:  # 限定圆的面积
+            if centerY > disMax:  # 遍历找距离最近的轮廓
+                disMax = centerY
+                disTemp = i
+    return disTemp
+
+
+def Task():
+    '''
+    flag
+    0: 表示没有黑线
+    1: 表示左边有黑线
+    2: 表示右边有黑线
+    '''
+
+    global flag
+    global blackLine
+    global symbol
+    global signal
+    global go
+    global leftShift
+    global rightShift
+    global frame
+    global runAction
+    global safeDis
+    global safeDisMin
+    global special
+    global count
+    # ------------------
+    if frame is not None:
+        # 图像二值法
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        ret, binary = cv.threshold(gray, 120, 255, cv.THRESH_BINARY_INV)
+        cv.imshow("binary", binary)
+        _, contours, hierarchy = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)  # 找出轮廓
+        # ------------------
+
+        dis = getDisMax(contours, frame)  # 距离最短
+
+        # ---------------------
+        for i, contour in enumerate(contours):  # 检测黑线
+            x, y, w, h = cv.boundingRect(contour)
+            if h >= 40 and (x == 0 or x + w == height):  # 区别黑线和陷阱的区别
+                blackLine = contour
+                cv.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                if x > height / 2:
+                    print("黑线在右边")
+                    flag = 2
+                    break
+                else:
+                    print("黑线在左边")
+                    flag = 1
+                    break
+            else:
+                #print("no black line")
+                flag = 0  # 没有黑线
+        # ---------------------
+
+        if blackLine is dis:  # 当将黑线误以为是陷阱时，把陷阱置为空
+            dis = None
+
+        # ---------------------                             # 处理结果
+        if runAction is False:
+            if dis is not None:
+                (centerX, centerY), radius = cv.minEnclosingCircle(dis)
+                print("center of circle: (%s,%s)" % (centerX, centerY))
+                cv.circle(frame, (int(centerX), int(centerY)), int(radius), (0, 0, 255), 2)
+
+            if dis is not None and blackLine is None:  # 有陷阱没黑线    第1种情况
+                print("第一种情况")
+                if centerY < safeDisMin:
+                    #print("*Go")
+                    print("1-1")
+                    go = True
+
+                elif centerY >= safeDisMin and centerY < safeDis:  # In the safe area
+                    special = 1             # The signal of the camero
+                    print("1-2")
+                    print("特殊情况")
+
+                elif centerX > height / 2 and centerY >= safeDis and symbol is True:  # 陷阱在机器人右边
+                    #print("*left shift")
+                    leftShift = True
+                    print("1-3")
+                elif centerX <= height / 2 and centerY >= safeDis and symbol is True:  # 陷阱在机器人左边
+                    #print("*right shift")
+                    print("1-4")
+                    rightShift = True
+                else:
+                    print("1-5")
+            elif dis is not None and blackLine is not None:  # 有陷阱有黑线    第2种情况
+                print("第二种情况")
+                if centerY < safeDis:  # 在安全距离之外
+                    #print("**Go  看到黑线，走进一点,再右平移")
+                    go = True
+                    print("2-1")
+                elif centerY >= safeDis:  # 在安全距离之内
+                    print("2-2")
+                    symbol = False  # 标志位置为False
+                    if flag == 1:  # 陷阱在左边
+                        print("2-2-1")
+                        #print("**right shift")
+                        rightShift = True
+                    elif flag == 2:
+                        print("2-2-2")
+                        #print("**left shift")  # 陷阱在右边
+                        leftShift = True
+
+            elif dis is None and blackLine is not None:  # 第3种情况 没陷阱有黑线
+                print("第三种情况")
+                if flag == 1:
+                    #print("***right shift")
+                    rightShift = True
+                elif flag == 2:
+                    #print("***left shift")
+                    leftShift = True
+            else:  # 第4种情况 没陷阱没黑线
+                print("第四种情况")
+                #print("****Go")
+                go = True
+                symbol = True
+                count += 1
+                if count == 4:
+                    print("调整平行")
+                    count = 0
+
+            blackLine = None  # 置为空
+       
+
+            if not symbol:  # 为解决第二种情况的方法
+                if flag == 1:  # 记录黑线的位置，因为flag 会因看不到黑线而改变值，需要signal去记录
+                    signal = 1
+                elif flag == 2:
+                    signal = 2
+
+                if signal == 1:
+                    #print("## right shift")
+                    rightShift = True
+                elif signal == 2:
+                    #print("## left shift")
+                    leftShift = True
+            print("flag is: %s" % flag)
+            runAction = True
+            cv.imshow("Frame", frame)
+
+    else:
+        print("Frame is None.")
+
+
+def actionGroup():
+    global go
+    global leftShift
+    global rightShift
+    global runAction
+    global special
+    global camero_Y_Angle 
+    while True:
+        if runAction:  # 如果为True，就执行动作
+            if special != 0:                            # special situation
+
+                if camero_Y_Angle == 2100:
+                    camero_Y_Angle = 2200
+                    PWMServo.setServo(1, camero_Y_Angle, 500)         # 把摄像头低下来
+                    print("Camero is down")
+                    SSR.running_action_group('6_go_straight_step2', 1)
+                    SSR.running_action_group('stand', 1)
+                    special = 0
+
+            if go:
+                print("Go")
+                if camero_Y_Angle == 2200:
+                    print("Camero is up")
+                    camero_Y_Angle = 2100
+                    PWMServo.setServo(1, camero_Y_Angle, 500)  # 正常角度
+                
+                SSR.running_action_group('6_go_straight_step2', 1)
+                go = False
+            elif leftShift:
+                print("left shift")
+                SSR.running_action_group('stand', 1)
+                SSR.running_action_group('one_step_left_small', 3)
+               
+                leftShift = False
+            elif rightShift:
+                print("right shift")
+                SSR.running_action_group('stand', 1)
+                SSR.running_action_group('one_step_right_small', 3)
+                
+                rightShift = False
+            else:
+                print("No Cammands")
+
+            runAction = False
+        
+
+
+th1 = threading.Thread(target=actionGroup)
+th1.setDaemon(True)
+th1.start()
+
+
+def video_demo():
+    global frame
+    capture = cv.VideoCapture(stream)
+    #capture = cv.VideoCapture('/dev/video1')
+    # capture = cv.VideoCapture(0)
+    while (True):
+        ret, frame = capture.read()
+        frame = cv.resize(frame, (height, width), interpolation=cv.INTER_CUBIC)  # 将图片缩放
+        # cv.imshow("FrameFinal", frame)
+        Task()
+        c = cv.waitKey(40)
+        if c == 27:
+       
